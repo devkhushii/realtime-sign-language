@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "realtime-sign-language"
+version = "0.1.0"
+description = ""
+authors = ["Khushi Rani <ranikhushi2005@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+faster-whisper = "^1.1.1"
+pyaudio = "^0.2.14"
+numpy = "^2.2.4"
+soundfile = "^0.13.1"
+pygame = "^2.6.1"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
