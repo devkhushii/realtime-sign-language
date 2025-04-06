@@ -1,74 +1,129 @@
-import queue
-import os
-import numpy as np
+import io
 import pyaudio
 import wave
+import numpy as np
 from faster_whisper import WhisperModel
+from datetime import datetime
 
+# -------- Colors --------
 NEON_GREEN = "\033[92m"
 RESET_COLOR = "\033[0m"
 
-# Load Whisper model
-model_size = "medium.en"
-model = WhisperModel(model_size, device="cpu")
-
-# Audio stream parameters
-CHUNK_SIZE = 1024
+# -------- Audio Params --------
+CHUNK = 1024
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
-RATE = 16000
+RATE = 44100
+RECORD_SECONDS = 3  # Reduced for faster feedback
+VOLUME_THRESHOLD = 200  # Adjust as needed
 
-audio_queue = queue.Queue()
+# -------- Load Whisper Model --------
+model_size = "medium.en"  # Faster for real-time CPU use
+model = WhisperModel(model_size, device="cpu")
+
+# -------- List and Select Input Device --------
 p = pyaudio.PyAudio()
-stream = p.open(
-    format=FORMAT,
-    channels=CHANNELS,
-    rate=RATE,
-    input=True,
-    frames_per_buffer=CHUNK_SIZE,
-)
+print("Available input devices:")
+device_info_map = {}
+
+for i in range(p.get_device_count()):
+    info = p.get_device_info_by_index(i)
+    if info["maxInputChannels"] > 0:
+        device_info_map[i] = info["name"]
+        print(f"[{i}] {info['name']}")
+
+device_index = int(input("\nEnter the device index of your microphone: "))
+if device_index not in device_info_map:
+    print("Invalid device index! Exiting...")
+    exit(1)
+print(f"Using device: {device_info_map[device_index]}\n")
+
+# -------- Open Audio Stream --------
+stream = p.open(format=FORMAT,
+                channels=CHANNELS,
+                rate=RATE,
+                input=True,
+                input_device_index=device_index,
+                frames_per_buffer=CHUNK)
+
+print("Model loaded. Speak something... (Ctrl+C to stop)\n")
 
 accumulated_transcription = ""
+last_transcription = ""
 
-def record_chunk(p, stream, filename, duration=2):  # Increase duration to 2s
+# -------- Normalize Audio --------
+def normalize_audio(audio_array):
+    max_val = np.max(np.abs(audio_array))
+    if max_val == 0:
+        return audio_array
+    return (audio_array / max_val * 32767).astype(np.int16)
+
+# -------- Record from Microphone --------
+def record_to_buffer():
     frames = []
-    for _ in range(0, int(RATE / CHUNK_SIZE * duration)):  
-        data = stream.read(CHUNK_SIZE, exception_on_overflow=False)  # Prevent buffer overflow
+    volume_sum = 0
+    for _ in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
+        data = stream.read(CHUNK, exception_on_overflow=False)
         frames.append(data)
+        audio_array = np.frombuffer(data, dtype=np.int16)
+        volume_sum += np.abs(audio_array).mean()
 
-    wf = wave.open(filename, "wb")
+    avg_volume = volume_sum / (RATE / CHUNK * RECORD_SECONDS)
+    print(f"[DEBUG] Avg Volume: {avg_volume:.2f}")
+
+    if avg_volume < VOLUME_THRESHOLD:
+        return None
+
+    combined_audio = np.frombuffer(b''.join(frames), dtype=np.int16)
+    normalized_audio = normalize_audio(combined_audio)
+
+    buffer = io.BytesIO()
+    wf = wave.open(buffer, 'wb')
     wf.setnchannels(CHANNELS)
     wf.setsampwidth(p.get_sample_size(FORMAT))
     wf.setframerate(RATE)
-    wf.writeframes(b"".join(frames))
+    wf.writeframes(normalized_audio.tobytes())
     wf.close()
+    buffer.seek(0)
+    return buffer
 
-def transcribe_chunk(model, filename):
-    segments, _ = model.transcribe(filename, word_timestamps=True, beam_size=5)
-    return " ".join(segment.text for segment in segments)
+# -------- Transcribe from Audio --------
+def transcribe_from_buffer(audio_buffer):
+    segments, _ = model.transcribe(audio_buffer, beam_size=10)
+    return " ".join(segment.text for segment in segments).strip()
 
+# -------- Main Loop --------
 try:
     while True:
-        print("speak now.....")
-        chunk_file = "temp_chunk.wav"
-        record_chunk(p, stream, chunk_file)
-        transcription = transcribe_chunk(model, chunk_file)
+        buffer = record_to_buffer()
+        if not buffer:
+            print("Listening...")
+            continue
 
-        if transcription.strip():  # Ignore empty transcriptions
+        transcription = transcribe_from_buffer(buffer)
+
+        if transcription and transcription.lower() != last_transcription.lower():
             print(NEON_GREEN + transcription + RESET_COLOR)
             accumulated_transcription += transcription + " "
-        
-        os.remove(chunk_file)
+            last_transcription = transcription
+        else:
+            print("speak now.....")
 
 except KeyboardInterrupt:
-    print("Stopping....")
-    with open("log.txt", "w") as log_file:
-        log_file.write(accumulated_transcription)
+    print("\nStopping... Saving log...")
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    with open(f"log_{timestamp}.txt", "w") as f:
+        f.write(accumulated_transcription.strip())
+
 finally:
-    print("LOG: " + accumulated_transcription)
     stream.stop_stream()
     stream.close()
     p.terminate()
+    print("LOG: ", accumulated_transcription)
+
+
+
 
 
 
